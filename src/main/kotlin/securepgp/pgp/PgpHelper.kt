@@ -1,8 +1,6 @@
 package securepgp.pgp
 
-import org.bouncycastle.bcpg.ArmoredOutputStream
-import org.bouncycastle.bcpg.CompressionAlgorithmTags
-import org.bouncycastle.bcpg.SymmetricKeyAlgorithmTags
+import org.bouncycastle.bcpg.*
 import org.bouncycastle.jce.provider.BouncyCastleProvider
 import org.bouncycastle.openpgp.*
 import org.bouncycastle.openpgp.bc.BcPGPObjectFactory
@@ -138,37 +136,135 @@ object PgpHelper {
 
     @Throws(IOException::class)
     fun encryptFile(out: OutputStream, fileName: String, encKey: PGPPublicKey, armor: Boolean, withIntegrityCheck: Boolean) {
-        var out = out
+        var output = out
         this.getProvider()
         if (armor) {
-            out = ArmoredOutputStream(out)
+            output = ArmoredOutputStream(output)
         }
-        val bOut = ByteArrayOutputStream()
-        val comData = PGPCompressedDataGenerator(
-            CompressionAlgorithmTags.ZIP
-        )
+        val byteOutStream = ByteArrayOutputStream()
+        val compressedData = PGPCompressedDataGenerator(CompressionAlgorithmTags.ZIP)
         PGPUtil.writeFileToLiteralData(
-            comData.open(bOut),
+            compressedData.open(byteOutStream),
             PGPLiteralData.BINARY, File(fileName)
         )
-        comData.close()
-        val c = JcePGPDataEncryptorBuilder(SymmetricKeyAlgorithmTags.CAST5).setWithIntegrityPacket(withIntegrityCheck)
+        compressedData.close()
+        val encryptorBuilder = JcePGPDataEncryptorBuilder(SymmetricKeyAlgorithmTags.CAST5).setWithIntegrityPacket(withIntegrityCheck)
             .setSecureRandom(
                 SecureRandom()
-            ).setProvider("BC")
-        val cPk = PGPEncryptedDataGenerator(c)
-        val d = JcePublicKeyKeyEncryptionMethodGenerator(encKey).setProvider(BouncyCastleProvider()).setSecureRandom(
+            ).setProvider(BC)
+        val encryptedDataGenerator = PGPEncryptedDataGenerator(encryptorBuilder)
+        val encryptionMethodGenerator = JcePublicKeyKeyEncryptionMethodGenerator(encKey).setProvider(BouncyCastleProvider()).setSecureRandom(
             SecureRandom()
         )
-        cPk.addMethod(d)
-        val bytes = bOut.toByteArray()
+        encryptedDataGenerator.addMethod(encryptionMethodGenerator)
+        val bytes = byteOutStream.toByteArray()
         try {
-            cPk.open(out, bytes.size.toLong()).use { cOut -> cOut.write(bytes) }
+            encryptedDataGenerator.open(output, bytes.size.toLong()).use { outputStream -> outputStream.write(bytes) }
         } catch (e: Exception) {
             throw IOException(e.message)
         }
-        out.close()
+        output.close()
     }
 
 
+    @Throws(IOException::class)
+    fun inputStreamToByteArray(inputStream: InputStream): ByteArray? {
+        val buffer = ByteArrayOutputStream()
+        var readedByte: Int
+        val data = ByteArray(1024)
+        while (inputStream.read(data, 0, data.size).also { readedByte = it } != -1) {
+            buffer.write(data, 0, readedByte)
+        }
+        buffer.flush()
+        return buffer.toByteArray()
+    }
+
+
+    @Throws(IOException::class, PGPException::class)
+    fun verifySignature(
+        fileName: String,
+        b: ByteArray,
+        keyIn: InputStream
+    ) {
+        var pgpFact: PGPObjectFactory = BcPGPObjectFactory(b)
+        val pgpSignatureList: PGPSignatureList
+        val pgpObject = pgpFact.nextObject()
+        if (pgpObject is PGPCompressedData) {
+            pgpFact = BcPGPObjectFactory(pgpObject.dataStream)
+            pgpSignatureList = pgpFact.nextObject() as PGPSignatureList
+        } else {
+            pgpSignatureList = pgpObject as PGPSignatureList
+        }
+        val pgpPubRingCollection: PGPPublicKeyRingCollection =
+            BcPGPPublicKeyRingCollection(PGPUtil.getDecoderStream(keyIn))
+        var bufferedInputStream: BufferedInputStream
+        var streamByte: Int
+        val pgpSignature = pgpSignatureList[0]
+        val key = pgpPubRingCollection.getPublicKey(pgpSignature.keyID)
+        pgpSignature.init(JcaPGPContentVerifierBuilderProvider().setProvider(BouncyCastleProvider()), key)
+        FileInputStream(fileName).use { fileInputStream -> //TODO refactor
+            bufferedInputStream = BufferedInputStream(fileInputStream)
+            while (bufferedInputStream.read().also { streamByte = it } >= 0) {
+                pgpSignature.update(streamByte.toByte())
+            }
+        }
+        if (pgpSignature.verify()) {
+            System.err.println("signature verified.") // TODO add logger
+        } else {
+            System.err.println("signature verification failed.")
+        }
+    }
+
+
+    @Throws(IOException::class, PGPException::class)
+    fun readSecretKey(input: InputStream): PGPSecretKey {
+        val pgpSec: PGPSecretKeyRingCollection = BcPGPSecretKeyRingCollection(
+            PGPUtil.getDecoderStream(input)
+        )
+        val keyRingIter = pgpSec.keyRings
+        while (keyRingIter.hasNext()) {
+            val keyRing = keyRingIter.next() as PGPSecretKeyRing
+            val keyIter = keyRing.secretKeys
+            while (keyIter.hasNext()) {
+                val key = keyIter.next() as PGPSecretKey
+                if (key.isSigningKey) {
+                    return key
+                }
+            }
+        }
+        throw IllegalArgumentException("Can't find signing key in key ring.")
+    }
+
+
+    @Throws(IOException::class, PGPException::class)
+    fun createSignature(fileName: String, keyIn: InputStream, pass: CharArray, armor: Boolean): ByteArray? {
+        val pgpSecKey = readSecretKey(keyIn)
+        val pgpPrivKey = pgpSecKey.extractPrivateKey(
+            JcePBESecretKeyDecryptorBuilder().setProvider(BouncyCastleProvider()).build(pass)
+        )
+        val pgpSignatureGenerator = PGPSignatureGenerator(
+            JcaPGPContentSignerBuilder(
+                pgpSecKey.publicKey.algorithm,
+                HashAlgorithmTags.SHA1
+            ).setProvider(BouncyCastleProvider())
+        )
+        pgpSignatureGenerator.init(PGPSignature.BINARY_DOCUMENT, pgpPrivKey)
+        val byteOut = ByteArrayOutputStream()
+        val armoredOutputStream = ArmoredOutputStream(byteOut)
+        val bcpgOutputStream = BCPGOutputStream(byteOut)
+        FileInputStream(fileName).use { fileInputStream ->
+            BufferedInputStream(fileInputStream).use { inputStream ->
+                var input: Int
+                while (inputStream.read().also { input = it } >= 0) {
+                    pgpSignatureGenerator.update(input.toByte())
+                }
+            }
+        }
+        armoredOutputStream.endClearText()
+        pgpSignatureGenerator.generate().encode(bcpgOutputStream)
+        if (armor) {
+            armoredOutputStream.close()
+        }
+        return byteOut.toByteArray()
+    }
 }
