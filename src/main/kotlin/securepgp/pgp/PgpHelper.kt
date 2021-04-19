@@ -8,7 +8,6 @@ import org.bouncycastle.openpgp.bc.BcPGPPublicKeyRingCollection
 import org.bouncycastle.openpgp.bc.BcPGPSecretKeyRingCollection
 import org.bouncycastle.openpgp.operator.jcajce.*
 import java.io.*
-import java.lang.Exception
 import java.security.Provider
 import java.security.SecureRandom
 import java.security.Security
@@ -27,7 +26,7 @@ object PgpHelper {
     }
 
     @Throws(IOException::class, PGPException::class)
-    fun readPublicKey(inputStream: InputStream?): PGPPublicKey? {
+    fun readPublicKey(inputStream: InputStream?): PGPPublicKey {
         val decodedInputStream = PGPUtil.getDecoderStream(inputStream)
         val pgpPublicKeyCollection: PGPPublicKeyRingCollection = BcPGPPublicKeyRingCollection(decodedInputStream)
 
@@ -44,7 +43,9 @@ object PgpHelper {
                 }
             }
         }
-        requireNotNull(key) { "Can't find encryption key in key ring." } //@TODO
+        if (key == null) {
+            throw IllegalArgumentException( "Can't find encryption key in key ring.");
+        }
         return key
     }
 
@@ -62,7 +63,9 @@ object PgpHelper {
     fun findSecretKey(keyIn: InputStream, keyID: Long, pass: CharArray): PGPPrivateKey? {
         val pgpSec: PGPSecretKeyRingCollection = BcPGPSecretKeyRingCollection(PGPUtil.getDecoderStream(keyIn))
         val pgpSecKey = pgpSec.getSecretKey(keyID) ?: return null
-        val decryptor = JcePBESecretKeyDecryptorBuilder(JcaPGPDigestCalculatorProviderBuilder().setProvider(BC).build()).setProvider(BC).build(pass)
+        val decryptor = JcePBESecretKeyDecryptorBuilder(
+            JcaPGPDigestCalculatorProviderBuilder().setProvider(BC).build()
+        ).setProvider(BC).build(pass)
         return pgpSecKey.extractPrivateKey(decryptor)
     }
 
@@ -89,7 +92,8 @@ object PgpHelper {
         //
         // find the secret key
         //
-        val it: Iterator<PGPPublicKeyEncryptedData> = encryptedDataList.encryptedDataObjects as Iterator<PGPPublicKeyEncryptedData>
+        val it: Iterator<PGPPublicKeyEncryptedData> =
+            encryptedDataList.encryptedDataObjects as Iterator<PGPPublicKeyEncryptedData>
         var pgpPrivateKey: PGPPrivateKey? = null
         var keyEncryptedData: PGPPublicKeyEncryptedData? = null
 
@@ -102,7 +106,8 @@ object PgpHelper {
             throw IllegalArgumentException("Secret key for message not found.");
         }
 
-        val keyDataDecryptorFactory = JcePublicKeyDataDecryptorFactoryBuilder().setProvider(BC).setContentProvider(BC).build(pgpPrivateKey)
+        val keyDataDecryptorFactory =
+            JcePublicKeyDataDecryptorFactoryBuilder().setProvider(BC).setContentProvider(BC).build(pgpPrivateKey)
         val clear = keyEncryptedData.getDataStream(keyDataDecryptorFactory)
         val plainFact: PGPObjectFactory = BcPGPObjectFactory(clear)
         var message = plainFact.nextObject()
@@ -135,7 +140,13 @@ object PgpHelper {
 
 
     @Throws(IOException::class)
-    fun encryptFile(out: OutputStream, fileName: String, encKey: PGPPublicKey, armor: Boolean, withIntegrityCheck: Boolean) {
+    fun encryptFile(
+        out: OutputStream,
+        fileName: String,
+        encKey: PGPPublicKey,
+        armor: Boolean,
+        withIntegrityCheck: Boolean
+    ) {
         var output = out
         this.getProvider()
         if (armor) {
@@ -148,14 +159,16 @@ object PgpHelper {
             PGPLiteralData.BINARY, File(fileName)
         )
         compressedData.close()
-        val encryptorBuilder = JcePGPDataEncryptorBuilder(SymmetricKeyAlgorithmTags.CAST5).setWithIntegrityPacket(withIntegrityCheck)
-            .setSecureRandom(
-                SecureRandom()
-            ).setProvider(BC)
+        val encryptorBuilder =
+            JcePGPDataEncryptorBuilder(SymmetricKeyAlgorithmTags.CAST5).setWithIntegrityPacket(withIntegrityCheck)
+                .setSecureRandom(
+                    SecureRandom()
+                ).setProvider(BC)
         val encryptedDataGenerator = PGPEncryptedDataGenerator(encryptorBuilder)
-        val encryptionMethodGenerator = JcePublicKeyKeyEncryptionMethodGenerator(encKey).setProvider(BouncyCastleProvider()).setSecureRandom(
-            SecureRandom()
-        )
+        val encryptionMethodGenerator =
+            JcePublicKeyKeyEncryptionMethodGenerator(encKey).setProvider(BouncyCastleProvider()).setSecureRandom(
+                SecureRandom()
+            )
         encryptedDataGenerator.addMethod(encryptionMethodGenerator)
         val bytes = byteOutStream.toByteArray()
         try {
@@ -209,9 +222,9 @@ object PgpHelper {
             }
         }
         if (pgpSignature.verify()) {
-            System.err.println("signature verified.") // TODO add logger
+            println("signature verified.") // TODO add logger
         } else {
-            System.err.println("signature verification failed.")
+            println("signature verification failed.")
         }
     }
 
@@ -237,7 +250,7 @@ object PgpHelper {
 
 
     @Throws(IOException::class, PGPException::class)
-    fun createSignature(fileName: String, keyIn: InputStream, pass: CharArray, armor: Boolean): ByteArray? {
+    fun createSignature(fileName: String, keyIn: InputStream, pass: CharArray, armor: Boolean): ByteArray {
         val pgpSecKey = readSecretKey(keyIn)
         val pgpPrivKey = pgpSecKey.extractPrivateKey(
             JcePBESecretKeyDecryptorBuilder().setProvider(BouncyCastleProvider()).build(pass)
